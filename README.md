@@ -21,3 +21,9 @@ Crea un bloque de transcripción:
 
 ## Tests
 pytest tests/
+
+## Run
+
+docker-compose build --no-cache
+docker-compose up
+
