@@ -26,5 +26,14 @@ services:
     depends_on:
       - db
 
+  redis:
+    image: redis:6.2.6
+    ports:
+      - "6379:6379"
+
+#    networks:
+#      - shared_network
+
+
 volumes:
   db_data:
