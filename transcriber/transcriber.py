@@ -2,9 +2,13 @@ import asyncio
 import json
 import argparse
 import logging
-import redis.asyncio as aioredis
+import datetime
+from multiprocessing.pool import worker
 
-# Configuración de logging
+import redis.asyncio as aioredis
+from dotenv import load_dotenv
+import os
+
 def setup_logger():
     logger = logging.getLogger("transcriber")
     logger.setLevel(logging.DEBUG)
@@ -17,79 +21,80 @@ def setup_logger():
 
 logger = setup_logger()
 
-async def consumer(name: str, redis: aioredis.Redis, queue: str, processing_queue: str, audit_queue: str):
-    """
-    Consume jobs de Redis usando BRPOPLPUSH:
-    - Toma la tarea de 'queue' y la mueve a 'processing_queue' atómicamente.
-    - Procesa la tarea.
-    - Si falla, reencola incrementando el campo 'attempts'.
-    - Si tiene éxito, mueve la tarea a 'audit_queue'.
-    """
+async def consumer(name: str, redis: aioredis.Redis, queue: str, processing_queue: str, transcribed_queue: str):
     logger.info(f"Transcriber {name} iniciado, escuchando '{queue}'")
     while True:
         try:
-            # Mover job de queue a processing_queue
             payload = await redis.brpoplpush(queue, processing_queue)
             job = json.loads(payload)
-            logger.info(f"Transcriber {name} recibió job: {job}")
+            logger.info(f"[{name}] Recibido: {job}")
 
             try:
-                # Procesamiento real (por ahora, solo imprimir)
-                print(f"Procesando archivo: {job.get('file-name')}")
+                # --- Aqui iría la lógica real de transcripción ---
+                print(f"[{name}] Transcribiendo archivo: {job.get('file_name')}")
 
-                # Éxito: eliminar de processing_queue y archivar
+                # marcar fecha de transcripción
+                job['transcription_date'] = datetime.datetime.utcnow().isoformat()
+
+                # eliminar de procesamiento y enviar a transcribed_files_no_deleted
                 await redis.lrem(processing_queue, 1, payload)
-                await redis.lpush(audit_queue, payload)
-                logger.info(f"Consumer {name} movió job a '{audit_queue}' para auditoría: {job}")
+                new_payload = json.dumps(job)
+                await redis.lpush(transcribed_queue, new_payload)
+                logger.info(f"[{name}] Job enviado a '{transcribed_queue}': {job}")
 
             except Exception as process_err:
-                # Fallo: reencolar con contador de intentos
+                # en caso de falla, reencolar con contador de intentos
                 await redis.lrem(processing_queue, 1, payload)
                 attempts = job.get('attempts', 0) + 1
                 job['attempts'] = attempts
                 new_payload = json.dumps(job)
                 await redis.lpush(queue, new_payload)
-                logger.error(f"Error procesando job {job}, reencolado intento #{attempts}: {process_err}")
+                logger.error(f"[{name}] Error procesando {job}, reintento #{attempts}: {process_err}")
 
         except Exception as e:
-            logger.error(f"Error en ciclo consumer {name}: {e}")
+            logger.error(f"[{name}] Error en bucle de consumo: {e}")
             await asyncio.sleep(1)
 
-async def main(redis_url: str, queue: str, processing_queue: str, audit_queue: str, workers: int):
+async def main(redis_url: str, queue: str, processing_queue: str, transcribed_queue: str, workers: int):
     redis = aioredis.from_url(redis_url, encoding="utf-8", decode_responses=True)
     try:
         tasks = []
         for i in range(workers):
             name = f"worker-{i+1}"
             tasks.append(asyncio.create_task(
-                consumer(name, redis, queue, processing_queue, audit_queue)
+                consumer(name, redis, queue, processing_queue, transcribed_queue)
             ))
         await asyncio.gather(*tasks)
     finally:
         await redis.close()
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description="Transcriber Redis consumers con reintentos y auditoría.")
-    parser.add_argument('--redis-url', default='redis://localhost:6379', help='URL de Redis')
-    parser.add_argument('--queue', default='transcription_jobs', help='Lista principal de jobs')
-    parser.add_argument('--processing-queue', default='processing_jobs', help='Lista de jobs en procesamiento')
-    parser.add_argument('--audit-queue', default='processed_jobs', help='Lista de jobs procesados para auditoría')
-    parser.add_argument('--workers', type=int, default=3, help='Número de consumidores concurrentes')
-    args = parser.parse_args()
+    # Carga variables desde .env
+    load_dotenv()
+
+    redis_host = os.getenv("REDIS_HOST", "localhost")
+    redis_port = os.getenv("REDIS_PORT", "6379")
+    # Construimos la URL como string, no el cliente
+    redis_url = f"redis://{redis_host}:{redis_port}"
+
+    workers = int(os.getenv("WORKERS", "3"))
+    pending_transcription_queue      = os.getenv("REDIS_QUEUE_TRANSCRIPTION_JOB")
+    in_process_queue                = os.getenv("REDIS_QUEUE_IN_TRANSCRIPTION_PROCESS")
+    transcribed_not_deleted_queue   = os.getenv("REDIS_QUEUE_TRANSCRIBED_FILES_NOT_DELETED_JOB")
 
     logger.info(
-        f"Iniciando {args.workers} consumer(s) para '{args.queue}' en {args.redis_url}. "
-        f"Processing: '{args.processing_queue}', Audit: '{args.audit_queue}'"
+        f"Iniciando {workers} workers en '{pending_transcription_queue}' → "
+        f"una vez procesados enviar a: '{transcribed_not_deleted_queue}', redis url: {redis_url}"
     )
+
     try:
-        asyncio.run(
-            main(
-                args.redis_url,
-                args.queue,
-                args.processing_queue,
-                args.audit_queue,
-                args.workers
-            )
-        )
+        # Aquí pasamos el *string* redis_url, no el cliente
+        asyncio.run(main(
+            redis_url,
+            pending_transcription_queue,
+            in_process_queue,
+            transcribed_not_deleted_queue,
+            workers
+        ))
     except KeyboardInterrupt:
-        logger.info("Deteniendo consumers...")
+        logger.info("Deteniendo transcribers…")
