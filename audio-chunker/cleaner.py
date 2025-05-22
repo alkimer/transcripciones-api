@@ -1,12 +1,12 @@
 import asyncio
-import json
-import argparse
-import logging
 import datetime
+import json
+import logging
 import os
+
 import redis.asyncio as aioredis
 from dotenv import load_dotenv
-import os
+
 
 def setup_logger():
     logger = logging.getLogger("cleaner")

@@ -1,18 +1,19 @@
-import os
-import re
-import json
-import uuid
 import argparse
 import asyncio
-import logging
 import datetime
+import json
+import logging
+import os
+import re
 import tempfile
+import uuid
 
-from yt_dlp import YoutubeDL
-from pydub import AudioSegment
 import redis.asyncio as aioredis
 from dotenv import load_dotenv
-import os
+from pydub import AudioSegment
+from yt_dlp import YoutubeDL
+
+
 # Configuración de logging
 def setup_logger():
     logger = logging.getLogger("youtube_chunker")
